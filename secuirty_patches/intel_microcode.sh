@@ -26,6 +26,70 @@ echo "System:            $PRETTY_NAME"
 echo "CPU:               $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
 echo "Current microcode: $(grep -m1 'microcode' /proc/cpuinfo | awk '{print $3}')"
 
+# ---------- 0. Proxmox no-subscription repository (nodes without a subscription) ----------
+# Without a subscription the enterprise repository answers 401 and 'apt-get update' fails.
+if command -v pvesubscription >/dev/null \
+   && ! pvesubscription get 2>/dev/null | grep -qi 'status: *active'; then
+  step "No active subscription - switching Proxmox repositories to no-subscription"
+  CODENAME=$VERSION_CODENAME
+  KEYRING=/usr/share/keyrings/proxmox-archive-keyring.gpg
+
+  # Remember the Ceph release (e.g. ceph-squid) if a Ceph repository is configured
+  CEPH_REL=""
+  for f in "$DIR"/ceph.list "$DIR"/ceph.sources; do
+    [[ -f $f ]] || continue
+    CEPH_REL=$(grep -oE 'ceph-[a-z]+' "$f" | head -n1 || true)
+    [[ -n $CEPH_REL ]] && break
+  done
+
+  # Disable enterprise repositories (kept as *.disabled)
+  for f in "$DIR"/pve-enterprise.list "$DIR"/pve-enterprise.sources; do
+    if [[ -f $f ]]; then mv -f "$f" "$f.disabled"; echo "Disabled: $f"; fi
+  done
+  CEPH_SWITCHED=0
+  for f in "$DIR"/ceph.list "$DIR"/ceph.sources; do
+    if [[ -f $f ]] && grep -q 'enterprise' "$f"; then
+      mv -f "$f" "$f.disabled"; echo "Disabled: $f"
+      CEPH_SWITCHED=1
+    fi
+  done
+
+  # Add pve-no-subscription unless it is already configured
+  if ! grep -rqs 'pve-no-subscription' /etc/apt/sources.list "$DIR"/*.list "$DIR"/*.sources; then
+    if [[ $CODENAME == trixie ]]; then
+      cat > "$DIR/proxmox.sources" <<EOF
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: $KEYRING
+EOF
+      echo "Added: $DIR/proxmox.sources"
+    else
+      echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+        > "$DIR/pve-no-subscription.list"
+      echo "Added: $DIR/pve-no-subscription.list"
+    fi
+  fi
+
+  # Add the Ceph no-subscription repository if the enterprise one was just disabled
+  if (( CEPH_SWITCHED )) && [[ -n $CEPH_REL ]]; then
+    if [[ $CODENAME == trixie ]]; then
+      cat > "$DIR/ceph-no-subscription.sources" <<EOF
+Types: deb
+URIs: http://download.proxmox.com/debian/$CEPH_REL
+Suites: trixie
+Components: no-subscription
+Signed-By: $KEYRING
+EOF
+    else
+      echo "deb http://download.proxmox.com/debian/$CEPH_REL bookworm no-subscription" \
+        > "$DIR/ceph-no-subscription.list"
+    fi
+    echo "Added: Ceph no-subscription repository ($CEPH_REL)"
+  fi
+fi
+
 # ---------- 1. Enable non-free-firmware on the Debian repositories ----------
 step "Enabling the 'non-free-firmware' component"
 
